@@ -1,17 +1,37 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') })
 const kafka = require('./client')
 
-// groupId identifica este consumer group.
-// Se você rodar dois processos com o mesmo groupId, o Kafka
-// divide as partitions entre eles (paralelismo automático).
+const admin    = kafka.admin()
 const consumer = kafka.consumer({ groupId: 'diybello-notificacoes' })
 
+async function garantirTopics(topics) {
+    await admin.connect()
+    const existentes = await admin.listTopics()
+    const faltando = topics.filter(t => !existentes.includes(t))
+
+    if (faltando.length > 0) {
+        await admin.createTopics({
+            topics: faltando.map(topic => ({
+                topic,
+                numPartitions: 1,
+                replicationFactor: 1
+            }))
+        })
+        console.log(`> topics criados: ${faltando.join(', ')}`)
+    }
+
+    await admin.disconnect()
+}
+
 async function iniciarConsumer() {
+    // Garante que o topic existe antes de assinar
+    await garantirTopics(['pedido.criado'])
+
     await consumer.connect()
     console.log('> kafka consumer conectado')
 
-    // subscribe registra interesse num topic.
-    // fromBeginning: true → lê desde o início (útil para dev/replay)
+    // fromBeginning: false → só mensagens novas (chegaram depois que ele conectou)
+    // fromBeginning: true  → relê tudo desde o começo (útil pra debug/replay)
     await consumer.subscribe({ topic: 'pedido.criado', fromBeginning: false })
 
     console.log('> aguardando eventos no topic [pedido.criado]...\n')

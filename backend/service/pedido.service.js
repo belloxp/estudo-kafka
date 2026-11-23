@@ -130,9 +130,11 @@ async function createPedido(dados, usuarioLogado) {
 
     // ---------- grava tudo dentro de uma transação ----------
     const transacao = await db.transaction()
+    let pedidoSalvo
+    let pedidoCompleto
 
     try {
-        const pedido = await Pedido.create({
+        pedidoSalvo = await Pedido.create({
             usuario_id: usuario.id,
             status: 'PENDENTE',
             subtotal,
@@ -147,7 +149,7 @@ async function createPedido(dados, usuarioLogado) {
         for (const item of itensValidados) {
 
             await ItemPedido.create({
-                pedido_id: pedido.id,
+                pedido_id: pedidoSalvo.id,
                 produto_id: item.produto_id,
                 nome_produto: item.nome_produto,
                 quantidade: item.quantidade,
@@ -167,16 +169,16 @@ async function createPedido(dados, usuarioLogado) {
                 quantidade: item.quantidade,
                 saldo_anterior,
                 saldo_atual,
-                motivo: `Venda do pedido numero ${pedido.id}`,
+                motivo: `Venda do pedido numero ${pedidoSalvo.id}`,
                 data: new Date()
             }, { transaction: transacao })
         }
 
         // ---------- gera a entrega com o endereço do cadastro ----------
         await Entrega.create({
-            pedido_id: pedido.id,
+            pedido_id: pedidoSalvo.id,
             status: 'PREPARANDO',
-            codigo_rastreio: gerarCodigoRastreio(pedido.id),
+            codigo_rastreio: gerarCodigoRastreio(pedidoSalvo.id),
             cep: usuario.cep,
             rua: usuario.rua,
             numero: usuario.numero,
@@ -188,43 +190,43 @@ async function createPedido(dados, usuarioLogado) {
 
         await transacao.commit()
 
-        const pedidoCompleto = await Pedido.findByPk(pedido.id, { include: INCLUDE_COMPLETO })
+        pedidoCompleto = await Pedido.findByPk(pedidoSalvo.id, { include: INCLUDE_COMPLETO })
 
-        // Publica evento no Kafka após commit bem-sucedido.
-        // Feito FORA da transação: o banco já garantiu consistência,
-        // e uma falha no Kafka não deve reverter o pedido.
-        await publicar('pedido.criado', {
-            pedido_id: pedido.id,
-            usuario_id: usuario.id,
-            usuario_email: usuario.email,
-            usuario_nome: usuario.nome,
-            total,
-            desconto: resultadoDesconto.desconto,
-            frete,
-            forma_pagamento: pedido.forma_pagamento,
-            quantidade_itens: itensValidados.length,
-            itens: itensValidados.map(i => ({
-                produto_id: i.produto_id,
-                nome: i.nome_produto,
-                quantidade: i.quantidade,
-                preco_unitario: i.preco_unitario
-            })),
-            criado_em: new Date().toISOString()
-        })
-
-        return {
-            pedido: pedidoCompleto,
-            resumo: {
-                subtotal,
-                desconto: resultadoDesconto.desconto,
-                frete,
-                total,
-                regras_aplicadas: resultadoDesconto.regras
-            }
-        }
     } catch (err) {
         await transacao.rollback()
         throw err
+    }
+
+    // Kafka FORA do try/catch da transação SQL: se o banco commitou, o pedido
+    // existe e não deve ser desfeito por uma falha no broker de mensagens.
+    await publicar('pedido.criado', {
+        pedido_id: pedidoSalvo.id,
+        usuario_id: usuario.id,
+        usuario_email: usuario.email,
+        usuario_nome: usuario.nome,
+        total,
+        desconto: resultadoDesconto.desconto,
+        frete,
+        forma_pagamento: pedidoSalvo.forma_pagamento,
+        quantidade_itens: itensValidados.length,
+        itens: itensValidados.map(i => ({
+            produto_id: i.produto_id,
+            nome: i.nome_produto,
+            quantidade: i.quantidade,
+            preco_unitario: i.preco_unitario
+        })),
+        criado_em: new Date().toISOString()
+    })
+
+    return {
+        pedido: pedidoCompleto,
+        resumo: {
+            subtotal,
+            desconto: resultadoDesconto.desconto,
+            frete,
+            total,
+            regras_aplicadas: resultadoDesconto.regras
+        }
     }
 }
 
